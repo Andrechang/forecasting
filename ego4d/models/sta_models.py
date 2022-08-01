@@ -160,7 +160,7 @@ class ResNetSTARoIHead(nn.Module):
 
 @MODEL_REGISTRY.register()
 class ShortTermAnticipationResNet(ResNet):
-    def _construct_network(self, cfg):
+    def _construct_network(self, cfg, with_head=False):
         super()._construct_network(cfg, with_head=False)
 
         width_per_group = cfg.RESNET.WIDTH_PER_GROUP
@@ -180,6 +180,92 @@ class ShortTermAnticipationResNet(ResNet):
         self.head_name = "headsta"
         self.add_module(self.head_name, head)
 
+    def extract_features(self, x):
+        """Performs feature extraction"""
+        x = self.s1(x)
+        x = self.s2(x)
+        for pathway in range(self.num_pathways):
+            pool = getattr(self, "pathway{}_pool".format(pathway))
+            x[pathway] = pool(x[pathway])
+        x = self.s3(x)
+        x = self.s4(x)
+        x = self.s5(x)
+        return x
+
+    def pack_boxes(self, bboxes):
+        """Packs images and boxes so that they can be processed in batch"""
+        # compute indexes
+        idx = torch.from_numpy(np.concatenate([[i]*len(b) for i, b in enumerate(bboxes)]))
+
+        # add indexes as first column of boxes
+        bboxes = torch.cat(bboxes, 0)
+        bboxes = torch.cat([idx.view(-1,1).to(bboxes.device), bboxes], 1)
+
+        return bboxes
+
+    def postprocess(self,
+                    pred_boxes,
+                    pred_object_labels,
+                    pred_object_scores,
+                    pred_verbs,
+                    pred_ttcs
+                    ):
+        """Obtains detections"""
+
+        detections = []
+        raw_predictions = []
+
+        for orig_boxes, orig_object_labels, object_scores, verb_scores, ttcs in zip(pred_boxes, pred_object_labels, pred_object_scores, pred_verbs, pred_ttcs):
+            if verb_scores.shape[0]>0:
+                verb_predictions = verb_scores.argmax(-1)
+
+                dets = {
+                    "boxes": orig_boxes,
+                    "nouns": orig_object_labels,
+                    "verbs": verb_predictions.cpu().numpy(),
+                    "ttcs": ttcs.cpu().numpy(),
+                    "scores": object_scores
+                }
+            else:
+                dets = {
+                    "boxes": np.zeros((0,4)),
+                    "nouns": np.array([]),
+                    "verbs": np.array([]),
+                    "ttcs": np.array([]),
+                    "scores": np.array([])
+                }
+
+            raw_predictions.append({
+                "boxes": orig_boxes,
+                "object_labels": orig_object_labels,
+                "object_scores": object_scores,
+                "verb_scores": verb_scores.cpu().numpy(),
+                "ttcs": ttcs.cpu().numpy()
+            })
+
+            detections.append(dets)
+
+        return detections, raw_predictions
+
+    def forward(self, videos, bboxes, orig_pred_boxes=None, pred_object_labels=None, pred_object_scores=None):
+        """Expects videos to be a batch of input tensors and bboxes
+        to be a list associated bounding boxes"""
+        packed_bboxes = self.pack_boxes(bboxes)
+
+        features = self.extract_features(videos)
+
+        pred_verbs, pred_ttcs = self.headsta(features, packed_bboxes)
+
+        if self.training:
+            return pred_verbs, pred_ttcs
+        else:
+            assert pred_object_labels is not None
+            assert pred_object_scores is not None
+            lengths = [len(x) for x in bboxes]  # number of boxes per entry
+            pred_verbs = pred_verbs.split(lengths, 0)
+            pred_ttcs = pred_ttcs.split(lengths, 0)
+            # compute detections and return them
+            return self.postprocess(orig_pred_boxes, pred_object_labels, pred_object_scores, pred_verbs, pred_ttcs)
 
 @MODEL_REGISTRY.register()
 class ShortTermAnticipationSlowFast(SlowFast):

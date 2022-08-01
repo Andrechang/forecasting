@@ -679,7 +679,7 @@ class Ego4dShortTermAnticipation(torch.utils.data.Dataset):
         uid = ann['uid']
 
         # get video_id, frame_number, gt_boxes, gt_noun_labels, gt_verb_labels and gt_ttc_targets
-        video_id = ann["video_uid"]
+        video_id = ann["video_id"]
         frame_number = ann['frame']
 
         if 'objects' in ann:

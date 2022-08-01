@@ -34,12 +34,12 @@ class PyAVSTADataset(Dataset):
         self.path_to_videos = path_to_videos
         self.retry = retry
         if args.video_uid is not None:
-            annotations = [a for a in annotations if a["video_uid"] in args.video_uid]
+            annotations = [a for a in annotations if a["video_id"] in args.video_uid]
 
         frames_per_video = defaultdict(list)
 
         for ann in annotations:
-            video_id = ann["video_uid"]
+            video_id = ann["video_id"]
             last_frame = ann["frame"]
             first_frame = np.max([0, last_frame - args.context_frames+1])
             frame_numbers = np.arange(first_frame, last_frame+1)

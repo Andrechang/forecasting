@@ -13,7 +13,7 @@ parser = ArgumentParser()
 parser.add_argument('path_to_annotations', type=Path)
 parser.add_argument('path_to_videos', type=Path)
 parser.add_argument('path_to_output', type=Path)
-parser.add_argument('--fname_format', type=str, default="{video_uid:s}_{frame_number:07d}.jpg")
+parser.add_argument('--fname_format', type=str, default="{video_id:s}_{frame_number:07d}.jpg")
 parser.add_argument('--jobs', default=1, type=int)
 parser.add_argument('--clips', action='store_true')
 
@@ -33,13 +33,13 @@ frame_numbers = []
 
 for ann in [train, val, test]:
     for x in ann['annotations']:
-        fname = args.fname_format.format(video_uid=x["video_uid"], frame_number=x["frame"])
+        fname = args.fname_format.format(video_id=x["video_id"], frame_number=x["frame"])
         names.append(fname)
         if args.clips:
             video_ids.append(x['clip_uid'])
             frame_numbers.append(x['clip_frame'])
         else:
-            video_ids.append(x['video_uid'])
+            video_ids.append(x['video_id'])
             frame_numbers.append(x['frame'])
 
 #images = sorted(images)

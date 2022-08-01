@@ -12,6 +12,7 @@ from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from scripts.slurm import copy_and_run_with_config
 from pytorch_lightning.plugins import DDPPlugin
+from pytorch_lightning.loggers import TensorBoardLogger
 
 
 logger = logging.get_logger(__name__)
@@ -94,6 +95,7 @@ def main(cfg):
     else:
         args = {"logger": False, "callbacks": checkpoint_callback}
 
+    # tblogger = TensorBoardLogger("tb_logs", name=cfg.DATA.TASK)
     trainer = Trainer(
         gpus=cfg.NUM_GPUS,
         num_nodes=cfg.NUM_SHARDS,
@@ -101,26 +103,32 @@ def main(cfg):
         max_epochs=cfg.SOLVER.MAX_EPOCH,
         num_sanity_val_steps=3,
         benchmark=True,
-        log_gpu_memory="min_max",
+        # log_gpu_memory="min_max",
+        # log_every_n_steps = 1,
         replace_sampler_ddp=False,
         fast_dev_run=cfg.FAST_DEV_RUN,
         default_root_dir=cfg.OUTPUT_DIR,
+        enable_checkpointing=True,
         plugins=DDPPlugin(find_unused_parameters=False),
+        # logger=tblogger,
         **args,
     )
 
     if cfg.TRAIN.ENABLE and cfg.TEST.ENABLE:
         trainer.fit(task)
-
         # Calling test without the lightning module arg automatically selects the best
         # model during training.
-        return trainer.test()
+        trainer.test()
 
     elif cfg.TRAIN.ENABLE:
-        return trainer.fit(task)
+        trainer.fit(task)
 
     elif cfg.TEST.ENABLE:
-        return trainer.test(task)
+        trainer.test(task)
+
+    if cfg.TRAIN.ENABLE:
+        trainer.save_checkpoint(os.path.join(cfg.OUTPUT_DIR, "model_.ckpt"))
+    return
 
 
 if __name__ == "__main__":
