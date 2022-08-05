@@ -49,11 +49,19 @@ class ShortTermAnticipationTask(VideoTask):
         pred_ttc = pred_ttc[valid_ttcs]
         ttc_targets = ttc_targets[valid_ttcs]
 
-        ttc_loss = self.ttc_loss_fun(
-            pred_ttc, ttc_targets
-        )
+        ttc_loss = self.ttc_loss_fun(pred_ttc, ttc_targets)
 
         loss = self.lossw[0] * verb_loss + self.lossw[1] * ttc_loss
+
+        # if torch.isnan(ttc_loss):
+        #     print('pred_ttc: ', pred_ttc, ttc_targets)
+        # if torch.isnan(verb_loss):
+        #     print('pred_verb: ', pred_verb, verb_labels)
+        # print(ttc_loss)
+        # print(verb_loss)
+        # print(loss)
+        # if torch.isnan(verb_loss) or torch.isnan(ttc_loss):
+        #     exit(1)
 
         pred_verb = np.concatenate(du.all_gather_unaligned(pred_verb.detach().cpu().numpy()), axis=0)
         pred_ttc = np.concatenate(du.all_gather_unaligned(pred_ttc.detach().cpu().numpy()), axis=0)

@@ -100,6 +100,8 @@ def construct_loader(cfg, split):
     # Construct the dataset
     dataset = build_dataset(dataset_name, cfg, split)
     # Create a sampler for multi-process training
+    # indices = torch.arange(400)
+    # dataset = torch.utils.data.Subset(dataset_o, indices)
 
     sampler = None
     if not cfg.FBLEARNER:

@@ -428,7 +428,10 @@ class Ego4dShortTermAnticipation(torch.utils.data.Dataset):
             boxes = [
                 cv2_transform.scale_boxes(self._crop_size, boxes[0], height, width)
             ]
-
+            if self.cfg.MODEL.MODEL_NAME == "ShortTermAnticipationEffFormer": # mvit needs img 256x256
+                imgs, boxes = cv2_transform.spatial_shift_crop_list(
+                    self._crop_size, imgs, 1, boxes=boxes
+                )
             if self._test_force_flip:
                 imgs, boxes = cv2_transform.horizontal_flip_list(
                     1, imgs, order="HWC", boxes=boxes

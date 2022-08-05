@@ -27,6 +27,7 @@ class ResNetSTARoIHead(nn.Module):
             verb_act_func=(None, "softmax"),
             ttc_act_func=("softplus", "softplus"),
             aligned=True,
+            tpool_en = True
     ):
         """
         The `__init__` method of any subclass should also contain these
@@ -70,6 +71,7 @@ class ResNetSTARoIHead(nn.Module):
             len({len(pool_size), len(dim_in)}) == 1
         ), "pathway dimensions are not consistent."
         self.num_pathways = len(pool_size)
+        self.tpool_en = tpool_en
         for pathway in range(self.num_pathways):
             temporal_pool = nn.AvgPool3d([pool_size[pathway][0], 1, 1], stride=1)
             self.add_module("s{}_tpool".format(pathway), temporal_pool)
@@ -125,8 +127,11 @@ class ResNetSTARoIHead(nn.Module):
         ), "Input tensor does not contain {} pathway".format(self.num_pathways)
         pool_out = []
         for pathway in range(self.num_pathways):
-            t_pool = getattr(self, "s{}_tpool".format(pathway))
-            out = t_pool(inputs[pathway])
+            if self.tpool_en:
+                t_pool = getattr(self, "s{}_tpool".format(pathway))
+                out = t_pool(inputs[pathway])
+            else:
+                out = inputs[pathway]
             assert out.shape[2] == 1
             out = torch.squeeze(out, 2)
 
@@ -315,6 +320,161 @@ class ShortTermAnticipationSlowFast(SlowFast):
         x = self.s5(x)
 
         return x
+
+    def pack_boxes(self, bboxes):
+        """Packs images and boxes so that they can be processed in batch"""
+        # compute indexes
+        idx = torch.from_numpy(np.concatenate([[i]*len(b) for i, b in enumerate(bboxes)]))
+
+        # add indexes as first column of boxes
+        bboxes = torch.cat(bboxes, 0)
+        bboxes = torch.cat([idx.view(-1,1).to(bboxes.device), bboxes], 1)
+
+        return bboxes
+
+    def postprocess(self,
+                    pred_boxes,
+                    pred_object_labels,
+                    pred_object_scores,
+                    pred_verbs,
+                    pred_ttcs
+                    ):
+        """Obtains detections"""
+
+        detections = []
+        raw_predictions = []
+
+        for orig_boxes, orig_object_labels, object_scores, verb_scores, ttcs in zip(pred_boxes, pred_object_labels, pred_object_scores, pred_verbs, pred_ttcs):
+            if verb_scores.shape[0]>0:
+                verb_predictions = verb_scores.argmax(-1)
+
+                dets = {
+                    "boxes": orig_boxes,
+                    "nouns": orig_object_labels,
+                    "verbs": verb_predictions.cpu().numpy(),
+                    "ttcs": ttcs.cpu().numpy(),
+                    "scores": object_scores
+                }
+            else:
+                dets = {
+                    "boxes": np.zeros((0,4)),
+                    "nouns": np.array([]),
+                    "verbs": np.array([]),
+                    "ttcs": np.array([]),
+                    "scores": np.array([])
+                }
+
+            raw_predictions.append({
+                "boxes": orig_boxes,
+                "object_labels": orig_object_labels,
+                "object_scores": object_scores,
+                "verb_scores": verb_scores.cpu().numpy(),
+                "ttcs": ttcs.cpu().numpy()
+            })
+
+            detections.append(dets)
+
+        return detections, raw_predictions
+
+    def forward(self, videos, bboxes, orig_pred_boxes=None, pred_object_labels=None, pred_object_scores=None):
+        """Expects videos to be a batch of input tensors and bboxes
+        to be a list associated bounding boxes"""
+        packed_bboxes = self.pack_boxes(bboxes)
+
+        features = self.extract_features(videos)
+
+        pred_verbs, pred_ttcs = self.headsta(features, packed_bboxes)
+
+        if self.training:
+            return pred_verbs, pred_ttcs
+        else:
+            assert pred_object_labels is not None
+            assert pred_object_scores is not None
+            lengths = [len(x) for x in bboxes]  # number of boxes per entry
+            pred_verbs = pred_verbs.split(lengths, 0)
+            pred_ttcs = pred_ttcs.split(lengths, 0)
+            # compute detections and return them
+            return self.postprocess(orig_pred_boxes, pred_object_labels, pred_object_scores, pred_verbs, pred_ttcs)
+
+
+from .video_model_builder import is_detection_enabled, _MODEL_STAGE_DEPTH, _TEMPORAL_KERNEL_BASIS
+from .batchnorm_helper import get_norm
+from ..utils import weight_init_helper as init_helper
+from .mobile_vit import MobileViT
+from typing import List
+
+@MODEL_REGISTRY.register()
+class ShortTermAnticipationEffFormer(nn.Module):
+
+    def __init__(self, cfg, with_head=True):
+        """
+        The `__init__` method of any subclass should also contain these
+            arguments.
+
+        Args:
+            cfg (CfgNode): model building configs, details are in the
+                comments of the config file.
+        """
+        super(ShortTermAnticipationEffFormer, self).__init__()
+        self.norm_module = get_norm(cfg)
+        self.enable_detection = is_detection_enabled(cfg)
+        self.num_pathways = 1
+        self._construct_network(cfg)
+        init_helper.init_weights(
+            self, cfg.MODEL.FC_INIT_STD, cfg.RESNET.ZERO_INIT_FINAL_BN
+        )
+
+    def _construct_network(self, cfg):
+        """
+        Builds a single pathway ResNet model.
+
+        Args:
+            cfg (CfgNode): model building configs, details are in the
+                comments of the config file.
+        """
+        assert cfg.MODEL.ARCH in _POOL1.keys()
+        pool_size = _POOL1[cfg.MODEL.ARCH]
+        assert len({len(pool_size), self.num_pathways}) == 1
+
+        dim_in = cfg.MVIT.HEADSTA_DIM_IN
+
+        head = ResNetSTARoIHead(
+            dim_in=[dim_in],
+            num_verbs=cfg.MODEL.NUM_VERBS,
+            pool_size=[[cfg.DATA.NUM_FRAMES // pool_size[0][0], 1, 1]],
+            resolution=[[cfg.DETECTION.ROI_XFORM_RESOLUTION] * 2],
+            scale_factor=[cfg.DETECTION.SPATIAL_SCALE_FACTOR],
+            dropout_rate=cfg.MODEL.DROPOUT_RATE,
+            verb_act_func=(None, cfg.MODEL.HEAD_VERB_ACT),
+            ttc_act_func=(cfg.MODEL.HEAD_TTC_ACT,) * 2,
+            aligned=cfg.DETECTION.ALIGNED,
+            tpool_en=False
+        )
+        self.head_name = "headsta"
+        self.add_module(self.head_name, head)
+
+        self.model = MobileViT(
+            image_size=(256, 256),
+            dims=[96, 120, 144],
+            channels=[16, 32, 48, 48, 64, 64, 128, 128, dim_in, dim_in, 384],
+            num_classes=1,
+        )
+        return
+
+    def extract_features(self, x: List):
+        """Performs feature extraction
+        return: List of Tensor
+        """
+        #convert (B, C, Frame, H, W) -> (B, C, H, W)
+        x = torch.mean(x[0], dim=2)
+        x = self.model.conv1(x)
+        for conv in self.model.stem:
+            x = conv(x)
+        for i, (conv, attn) in enumerate(self.model.trunk):
+            x = conv(x)
+            x = attn(x)
+        x = x.unsqueeze(2)
+        return [x]
 
     def pack_boxes(self, bboxes):
         """Packs images and boxes so that they can be processed in batch"""

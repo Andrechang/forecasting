@@ -95,7 +95,6 @@ def main(cfg):
     else:
         args = {"logger": False, "callbacks": checkpoint_callback}
 
-    # tblogger = TensorBoardLogger("tb_logs", name=cfg.DATA.TASK)
     trainer = Trainer(
         gpus=cfg.NUM_GPUS,
         num_nodes=cfg.NUM_SHARDS,
@@ -110,7 +109,6 @@ def main(cfg):
         default_root_dir=cfg.OUTPUT_DIR,
         enable_checkpointing=True,
         plugins=DDPPlugin(find_unused_parameters=False),
-        # logger=tblogger,
         **args,
     )
 

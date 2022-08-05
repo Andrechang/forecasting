@@ -277,6 +277,9 @@ _C.SLOWFAST.FUSION_KERNEL_SZ = 5
 # -----------------------------------------------------------------------------
 _C.MVIT = CfgNode()
 
+# head dim_in
+_C.MVIT.HEADSTA_DIM_IN = 384
+
 # Options include `conv`, `max` or "conv_unshared"
 _C.MVIT.MODE = "conv"
 
@@ -371,7 +374,7 @@ _C.DATA.PATH_TO_DATA_DIR = ""
 _C.DATA.PATH_PREFIX = ""
 
 # Model head path if any
-_C.DATA.CHECKPOINT_MODULE_FILE_PATH = "ego4d/models/"
+_C.DATA.CHECKPOINT_MODULE_FILE_PATH = ""
 
 # The spatial crop size of the input clip.
 _C.DATA.CROP_SIZE = 224
