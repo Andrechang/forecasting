@@ -404,7 +404,7 @@ from .mobile_vit import MobileViT
 from typing import List
 
 @MODEL_REGISTRY.register()
-class ShortTermAnticipationEffFormer(nn.Module):
+class ShortTermAnticipationMViT(nn.Module):
 
     def __init__(self, cfg, with_head=True):
         """
@@ -415,14 +415,12 @@ class ShortTermAnticipationEffFormer(nn.Module):
             cfg (CfgNode): model building configs, details are in the
                 comments of the config file.
         """
-        super(ShortTermAnticipationEffFormer, self).__init__()
+        super(ShortTermAnticipationMViT, self).__init__()
         self.norm_module = get_norm(cfg)
         self.enable_detection = is_detection_enabled(cfg)
         self.num_pathways = 1
         self._construct_network(cfg)
-        init_helper.init_weights(
-            self, cfg.MODEL.FC_INIT_STD, cfg.RESNET.ZERO_INIT_FINAL_BN
-        )
+        init_helper.init_weights(self, cfg.MODEL.FC_INIT_STD, cfg.RESNET.ZERO_INIT_FINAL_BN)
 
     def _construct_network(self, cfg):
         """
@@ -473,7 +471,7 @@ class ShortTermAnticipationEffFormer(nn.Module):
         for i, (conv, attn) in enumerate(self.model.trunk):
             x = conv(x)
             x = attn(x)
-        x = x.unsqueeze(2)
+        x = x.unsqueeze(2) #add frame dim back to feat
         return [x]
 
     def pack_boxes(self, bboxes):
@@ -550,3 +548,166 @@ class ShortTermAnticipationEffFormer(nn.Module):
             pred_ttcs = pred_ttcs.split(lengths, 0)
             # compute detections and return them
             return self.postprocess(orig_pred_boxes, pred_object_labels, pred_object_scores, pred_verbs, pred_ttcs)
+
+from .efficientformer import EfficientFormer, EfficientFormer_depth, EfficientFormer_width
+from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+from einops import rearrange
+
+@MODEL_REGISTRY.register()
+class ShortTermAnticipationEffFormer(nn.Module):
+
+    def __init__(self, cfg, with_head=True):
+        """
+        The `__init__` method of any subclass should also contain these
+            arguments.
+
+        Args:
+            cfg (CfgNode): model building configs, details are in the
+                comments of the config file.
+        """
+        super(ShortTermAnticipationEffFormer, self).__init__()
+        self.norm_module = get_norm(cfg)
+        self.enable_detection = is_detection_enabled(cfg)
+        self.num_pathways = 1
+        self._construct_network(cfg)
+        init_helper.init_weights(self, cfg.MODEL.FC_INIT_STD, cfg.RESNET.ZERO_INIT_FINAL_BN)
+
+    def _construct_network(self, cfg):
+        """
+        Builds a single pathway ResNet model.
+
+        Args:
+            cfg (CfgNode): model building configs, details are in the
+                comments of the config file.
+        """
+        assert cfg.MODEL.ARCH in _POOL1.keys()
+        pool_size = _POOL1[cfg.MODEL.ARCH]
+        assert len({len(pool_size), self.num_pathways}) == 1
+
+        dim_in = cfg.MVIT.HEADSTA_DIM_IN
+
+        head = ResNetSTARoIHead(
+            dim_in=[dim_in],
+            num_verbs=cfg.MODEL.NUM_VERBS,
+            pool_size=[[cfg.DATA.NUM_FRAMES // pool_size[0][0], 1, 1]],
+            resolution=[[cfg.DETECTION.ROI_XFORM_RESOLUTION] * 2],
+            scale_factor=[cfg.DETECTION.SPATIAL_SCALE_FACTOR],
+            dropout_rate=cfg.MODEL.DROPOUT_RATE,
+            verb_act_func=(None, cfg.MODEL.HEAD_VERB_ACT),
+            ttc_act_func=(cfg.MODEL.HEAD_TTC_ACT,) * 2,
+            aligned=cfg.DETECTION.ALIGNED,
+            tpool_en=False
+        )
+        self.head_name = "headsta"
+        self.add_module(self.head_name, head)
+
+        self.model = EfficientFormer(
+            layers=EfficientFormer_depth['l1'],
+            embed_dims=EfficientFormer_width['l1'],
+            downsamples=[True, True, True, True],
+            vit_num=1)
+
+        self.model.default_cfg = {
+            'url': '',
+            'num_classes': 1,
+            'input_size': (3, 256, 256), #input 256x256
+            'pool_size': None,
+            'crop_pct': .95,
+            'interpolation': 'bicubic',
+            'mean': IMAGENET_DEFAULT_MEAN,
+            'std': IMAGENET_DEFAULT_STD,
+            'classifier': 'head'}
+
+        return
+
+    def extract_features(self, x: List):
+        """Performs feature extraction
+        return: List of Tensor
+        """
+        # convert (B, C, Frame, H, W) -> (B, C, H, W)
+        x = torch.mean(x[0], dim=2)
+        x = self.model.patch_embed(x)
+        x = self.model.forward_tokens(x)
+        x = self.model.norm(x)
+        x = rearrange(x, 'b (h w) p -> b p h w', h=8, w=8)
+        x = x.unsqueeze(2)  # add frame dim back to feat
+        return [x]
+
+    def pack_boxes(self, bboxes):
+        """Packs images and boxes so that they can be processed in batch"""
+        # compute indexes
+        idx = torch.from_numpy(np.concatenate([[i] * len(b) for i, b in enumerate(bboxes)]))
+
+        # add indexes as first column of boxes
+        bboxes = torch.cat(bboxes, 0)
+        bboxes = torch.cat([idx.view(-1, 1).to(bboxes.device), bboxes], 1)
+
+        return bboxes
+
+    def postprocess(self,
+                    pred_boxes,
+                    pred_object_labels,
+                    pred_object_scores,
+                    pred_verbs,
+                    pred_ttcs
+                    ):
+        """Obtains detections"""
+
+        detections = []
+        raw_predictions = []
+
+        for orig_boxes, orig_object_labels, object_scores, verb_scores, ttcs in zip(pred_boxes, pred_object_labels,
+                                                                                    pred_object_scores, pred_verbs,
+                                                                                    pred_ttcs):
+            if verb_scores.shape[0] > 0:
+                verb_predictions = verb_scores.argmax(-1)
+
+                dets = {
+                    "boxes": orig_boxes,
+                    "nouns": orig_object_labels,
+                    "verbs": verb_predictions.cpu().numpy(),
+                    "ttcs": ttcs.cpu().numpy(),
+                    "scores": object_scores
+                }
+            else:
+                dets = {
+                    "boxes": np.zeros((0, 4)),
+                    "nouns": np.array([]),
+                    "verbs": np.array([]),
+                    "ttcs": np.array([]),
+                    "scores": np.array([])
+                }
+
+            raw_predictions.append({
+                "boxes": orig_boxes,
+                "object_labels": orig_object_labels,
+                "object_scores": object_scores,
+                "verb_scores": verb_scores.cpu().numpy(),
+                "ttcs": ttcs.cpu().numpy()
+            })
+
+            detections.append(dets)
+
+        return detections, raw_predictions
+
+    def forward(self, videos, bboxes, orig_pred_boxes=None, pred_object_labels=None, pred_object_scores=None):
+        """Expects videos to be a batch of input tensors and bboxes
+        to be a list associated bounding boxes"""
+        packed_bboxes = self.pack_boxes(bboxes)
+
+        features = self.extract_features(videos)
+
+        pred_verbs, pred_ttcs = self.headsta(features, packed_bboxes)
+
+        if self.training:
+            return pred_verbs, pred_ttcs
+        else:
+            assert pred_object_labels is not None
+            assert pred_object_scores is not None
+            lengths = [len(x) for x in bboxes]  # number of boxes per entry
+            pred_verbs = pred_verbs.split(lengths, 0)
+            pred_ttcs = pred_ttcs.split(lengths, 0)
+            # compute detections and return them
+            return self.postprocess(orig_pred_boxes, pred_object_labels, pred_object_scores, pred_verbs, pred_ttcs)
+
+
